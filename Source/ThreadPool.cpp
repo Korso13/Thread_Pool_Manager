@@ -9,11 +9,14 @@ ThreadPool::ThreadPool(size_t _MaxThreads)
 
 void ThreadPool::LaunchThreadPool()
 {
+	//reserve the 0 TaskID for state of no task performed
+	TaskIDs.insert(std::pair < uint64_t, std::thread::id>(0, std::this_thread::get_id()));
+	
 	//create a pool of worker threads that will be pulling tasks from TasksQueue
 	for (size_t i = 0; i < MaxThreads; i++)
 	{
 		std::thread NewThread(&ThreadPool::ThreadWorker, this);
-		ThreadsStatus.emplace(NewThread.get_id(), std::make_pair(false, 0));
+		ThreadsStatus.emplace(NewThread.get_id(), std::make_tuple(false, 0, nullptr));
 		//ActiveThreads.push_back(NewThread);
 		NewThread.detach(); //another ThreadWorker's work loop is launched
 	}
@@ -30,6 +33,7 @@ void ThreadPool::ThreadWorker()
 {
 	std::shared_lock<std::shared_mutex> QueueLock(M_TasksQueue);
 	std::shared_lock<std::shared_mutex> ThreadStatusLock(M_ThreadsStatus);
+	std::shared_lock<std::shared_mutex> TaskIDLock(M_TaskIDs);
 	
 	uint64_t CurrentTaskID;
 	
@@ -42,16 +46,24 @@ void ThreadPool::ThreadWorker()
 		{
 			CurrentTaskID = TasksQueue.front()->GetTaskID();
 			AsyncTask* CurrentTask = TasksQueue.front();
-			TasksQueue.pop(); //remove the task from queue
+			TasksQueue.pop_front(); //remove the task from queue
 			QueueLock.unlock();
 
 			ThreadStatusLock.lock();
 			auto It = ThreadsStatus.find(std::this_thread::get_id()); //find this thread's record in the ThreadsStatus std::map
-			It->second.first = true; //This thread is working
-			It->second.second = CurrentTaskID; //Thread task's ID
+			It->second = std::make_tuple(true, CurrentTaskID, CurrentTask); //This thread is working flag + Thread task's ID + ptr to the task's wrapper
 			ThreadStatusLock.unlock();
 
+			TaskIDLock.lock();
+			TaskIDs.find(CurrentTaskID)->second = std::this_thread::get_id(); //assigning this thread's id to the TaskID (needed for wait() member function to work)
+			TaskIDLock.unlock();
+
 			CurrentTask->StartTask(); //loop is stuck until the task is complete
+			if (CurrentTask->ShouldNotifyMainThreadOnFinish()) //unlocks main thread if wait() was called on this task
+			{
+				bMainThreadUnlocked = true;
+				CV_MainFunction.notify_all();
+			}
 		}
 		else
 		{
@@ -61,33 +73,117 @@ void ThreadPool::ThreadWorker()
 
 		ThreadStatusLock.lock();
 		auto It = ThreadsStatus.find(std::this_thread::get_id());
-		It->second.first = false; //This thread is not working anymore
-		It->second.second = 0; //Thread task's ID
+		It->second = std::make_tuple(false, 0, nullptr); //This thread is not working anymore
 		ThreadStatusLock.unlock();
 	}
 }
 
 uint64_t ThreadPool::AddTask(std::function<void()>& _InFunc)
 {
-	//assign ID to teh task
+	//trying to lock main thread (redudancy in case of wait() member functions' use)
+	std::lock_guard<std::mutex> MainThreadLock(M_MainFunction);
+	//assign ID to the task
 	uint64_t NewTaskID = TaskIDs.size();
-	TaskIDs.insert(NewTaskID);
+	TaskIDs.insert(std::pair< uint64_t, std::thread::id>(NewTaskID, std::this_thread::get_id())); //thread_id is temporary - fill be replaced once the task is launched by a specific task thread
 
 	//create wrapper for the task
 	AsyncTask* NewTask = new AsyncTask(_InFunc, NewTaskID);
 
 	//throw it into queue, where the first free ThreadWorker will grab it
-	TasksQueue.push(NewTask);
+	TasksQueue.push_back(NewTask);
 	
 	return NewTaskID;
 }
 
-void AsyncTask::StartTask()
+void ThreadPool::wait(uint64_t _TaskID)
 {
-	TaskToRun();
+	std::shared_lock<std::shared_mutex> QueueLock(M_TasksQueue);
+	std::shared_lock<std::shared_mutex> ThreadStatusLock(M_ThreadsStatus);
+	std::shared_lock<std::shared_mutex> TaskIDLock(M_TaskIDs);
+	
+	TaskIDLock.lock();
+	auto It = TaskIDs.find(_TaskID);
+	if (It == TaskIDs.end())
+	{
+		return; //no such task was ever created
+	}
+
+	std::thread::id TaskThreadID;
+
+	if (It->second != std::this_thread::get_id()) //means that the task might be worked on in the thread
+	{
+		TaskThreadID = It->second;
+		TaskIDLock.unlock();
+		ThreadStatusLock.lock();
+		auto TaskThreadRef = ThreadsStatus.find(TaskThreadID);
+		if (TaskThreadRef != ThreadsStatus.end())//the task IS still being worked on
+		{
+			std::get<2>(TaskThreadRef->second)->SetNotifyMainThreadOnFinish(); //we tell the task's worker thread to unlock teh main thread once the task is done
+			ThreadStatusLock.unlock();
+			std::lock_guard<std::mutex> MainThreadLock(M_MainFunction); //locking main thread
+			bMainThreadUnlocked = false; 
+			CV_MainFunction.notify_all();
+			return;
+		}
+		else 
+		{
+			ThreadStatusLock.unlock(); //task has already been completed
+			return;
+		}
+	}
+	else //means that the task is in the queue
+	{
+		TaskIDLock.unlock();
+		QueueLock.lock();
+		for (const auto Task : TasksQueue)
+		{
+			if (Task->GetTaskID() == _TaskID)
+			{
+				Task->SetNotifyMainThreadOnFinish(); //we tell the task's worker thread to unlock teh main thread once the task is done
+				break;
+			}
+		}
+		QueueLock.unlock();
+		std::lock_guard<std::mutex> MainThreadLock(M_MainFunction);//locking main thread
+		bMainThreadUnlocked = false; 
+		CV_MainFunction.notify_all();
+		return;
+	}
 }
 
-void AsyncTask::Wait()
+void ThreadPool::wait_all()
 {
-	//std::call_once(callflag, &AsyncTask::);
+	bMainThreadUnlocked = false; //locking main thread
+	std::lock_guard<std::mutex> MainThreadLock(M_MainFunction);
+
+	auto WatcherLambda = [this](std::lock_guard<std::mutex>* lock) {
+		while (true)
+		{
+			bool bNoActiveTasks = true;
+			for (const auto Task : ThreadsStatus)
+			{
+				if (std::get<0>(Task.second))
+				{
+					bNoActiveTasks = false;
+					break;
+				}
+			}
+			if (TasksQueue.size() == 0 && bNoActiveTasks)
+			{
+				bMainThreadUnlocked = true; //unlocking main thread
+				if (lock)
+				{
+					lock->~lock_guard();
+				}
+				CV_MainFunction.notify_all();
+				break;
+			}
+		};
+	};
+	
+	std::thread WatcherThread(WatcherLambda, &MainThreadLock); //launch the above loop in a separate thread to avoid freezing it along with the main one
+	WatcherThread.detach();
+
+	CV_MainFunction.notify_all(); //locks the main thread until a detached watcher thread unlocks it
+	return;
 }
