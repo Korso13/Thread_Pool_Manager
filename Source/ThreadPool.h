@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <mutex>
+#include <shared_mutex>
 #include <future>
 #include <map>
 #include <set>
@@ -19,11 +20,11 @@ private:
 	
 	std::once_flag callflag;
 
-	std::function<class T()>& TaskToRun;
+	std::function<void()>& TaskToRun;
 
 public:
 
-	AsyncTask(std::function<class T()>& _InTask, uint64_t _ThisTaskID) : TaskToRun(_InTask), TaskID(_ThisTaskID) {	};
+	AsyncTask(std::function<void()>& _InTask, uint64_t _ThisTaskID) : TaskToRun(_InTask), TaskID(_ThisTaskID) {	};
 
 	uint64_t GetTaskID() const { return TaskID; }
 
@@ -43,9 +44,9 @@ private:
 	//Mutextes and condition variables:
 	std::mutex M_MainFunction;
 
-	std::mutex M_TasksQueue;
+	std::shared_mutex M_TasksQueue;
 
-	std::mutex M_ThreadsStatus;
+	std::shared_mutex M_ThreadsStatus;
 
 	std::condition_variable CV_MainFunction;
 
@@ -58,14 +59,14 @@ private:
 
 	//Vector with all task threads
 	//Possibly not needed
-	std::vector<std::thread> ActiveThreads;
+	//std::vector<std::thread> ActiveThreads;
 
 	//Map containing all worker threads' statuses. One record per each Task Thread(aka ThreadWorker()); 
 	//in std::pair, bool indicates thread's status(working/not working), uint64_t - active task's ID
 	std::map<std::thread::id, std::pair<bool, uint64_t>> ThreadsStatus; 
 
 	//Tasks' queue
-	std::queue<AsyncTask> TasksQueue; 
+	std::queue<AsyncTask*> TasksQueue; 
 
 	//Tasks' unique IDs'
 	std::set<uint64_t> TaskIDs; //assures unique TaskIDs
@@ -89,6 +90,6 @@ public:
 	ThreadPool(size_t _MaxThreads);
 
 	//adds a new function to the pool of tasks
-	//Does not accept functions with variable amount of random arguements at the moment
-	uint64_t AddTask(std::function<class T()>& _InFunc);
+	//Does not accept functions with variable amount of random arguements or returns other than void at the moment
+	uint64_t AddTask(std::function<void()>& _InFunc);
 };

@@ -1,8 +1,5 @@
 #include "ThreadPool.h"
 
-#include <shared_mutex>
-
-
 ThreadPool::ThreadPool(size_t _MaxThreads)
 {
 	MaxThreads = _MaxThreads;
@@ -15,9 +12,9 @@ void ThreadPool::LaunchThreadPool()
 	//create a pool of worker threads that will be pulling tasks from TasksQueue
 	for (size_t i = 0; i < MaxThreads; i++)
 	{
-		std::thread NewThread(&ThreadPool::ThreadWorker);
+		std::thread NewThread(&ThreadPool::ThreadWorker, this);
 		ThreadsStatus.emplace(NewThread.get_id(), std::make_pair(false, 0));
-		ActiveThreads.push_back(NewThread);
+		//ActiveThreads.push_back(NewThread);
 		NewThread.detach(); //another ThreadWorker's work loop is launched
 	}
 
@@ -25,14 +22,14 @@ void ThreadPool::LaunchThreadPool()
 	while (true)
 	{
 		std::unique_lock<std::mutex> MainFuncLock(M_MainFunction);
-		CV_MainFunction.wait(MainFuncLock, IsMainThreadUnlocked);
+		CV_MainFunction.wait(MainFuncLock, [this]()->bool {return IsMainThreadUnlocked(); });
 	}
 }
 
 void ThreadPool::ThreadWorker()
 {
-	std::shared_lock<std::mutex> QueueLock(M_TasksQueue);
-	std::shared_lock<std::mutex> ThreadStatusLock(M_ThreadsStatus);
+	std::shared_lock<std::shared_mutex> QueueLock(M_TasksQueue);
+	std::shared_lock<std::shared_mutex> ThreadStatusLock(M_ThreadsStatus);
 	
 	uint64_t CurrentTaskID;
 	
@@ -43,8 +40,8 @@ void ThreadPool::ThreadWorker()
 
 		if (TasksQueue.size() > 0)
 		{
-			CurrentTaskID = TasksQueue.front().GetTaskID();
-			AsyncTask& CurrentTask = TasksQueue.front();
+			CurrentTaskID = TasksQueue.front()->GetTaskID();
+			AsyncTask* CurrentTask = TasksQueue.front();
 			TasksQueue.pop(); //remove the task from queue
 			QueueLock.unlock();
 
@@ -54,7 +51,7 @@ void ThreadPool::ThreadWorker()
 			It->second.second = CurrentTaskID; //Thread task's ID
 			ThreadStatusLock.unlock();
 
-			CurrentTask.StartTask(); //loop is stuck until the task is complete
+			CurrentTask->StartTask(); //loop is stuck until the task is complete
 		}
 		else
 		{
@@ -70,14 +67,14 @@ void ThreadPool::ThreadWorker()
 	}
 }
 
-uint64_t ThreadPool::AddTask(std::function<class T()>& _InFunc)
+uint64_t ThreadPool::AddTask(std::function<void()>& _InFunc)
 {
 	//assign ID to teh task
 	uint64_t NewTaskID = TaskIDs.size();
 	TaskIDs.insert(NewTaskID);
 
 	//create wrapper for the task
-	AsyncTask NewTask(_InFunc, NewTaskID);
+	AsyncTask* NewTask = new AsyncTask(_InFunc, NewTaskID);
 
 	//throw it into queue, where the first free ThreadWorker will grab it
 	TasksQueue.push(NewTask);
