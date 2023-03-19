@@ -28,6 +28,8 @@ public:
 
 	AsyncTask(std::function<void()>& _InTask, uint64_t _ThisTaskID) : TaskToRun(_InTask), TaskID(_ThisTaskID) {	};
 
+	~AsyncTask();
+
 	uint64_t GetTaskID() const { return TaskID; }
 
 	//starts asyncronous task

@@ -58,12 +58,18 @@ void ThreadPool::ThreadWorker()
 			TaskIDs.find(CurrentTaskID)->second = std::this_thread::get_id(); //assigning this thread's id to the TaskID (needed for wait() member function to work)
 			TaskIDLock.unlock();
 
+			if (!CurrentTask)
+			{
+				continue;
+			}
+
 			CurrentTask->StartTask(); //loop is stuck until the task is complete
 			if (CurrentTask->ShouldNotifyMainThreadOnFinish()) //unlocks main thread if wait() was called on this task
 			{
 				bMainThreadUnlocked = true;
 				CV_MainFunction.notify_all();
 			}
+			CurrentTask->~AsyncTask(); //free up teh memory allocated to keep the task wrapper
 		}
 		else
 		{
@@ -90,9 +96,13 @@ uint64_t ThreadPool::AddTask(std::function<void()>& _InFunc)
 	AsyncTask* NewTask = new AsyncTask(_InFunc, NewTaskID);
 
 	//throw it into queue, where the first free ThreadWorker will grab it
-	TasksQueue.push_back(NewTask);
+	if (NewTask)
+	{
+		TasksQueue.push_back(NewTask);
+		return NewTaskID;	
+	}
 	
-	return NewTaskID;
+	return 0;
 }
 
 void ThreadPool::wait(uint64_t _TaskID)
@@ -118,7 +128,14 @@ void ThreadPool::wait(uint64_t _TaskID)
 		auto TaskThreadRef = ThreadsStatus.find(TaskThreadID);
 		if (TaskThreadRef != ThreadsStatus.end())//the task IS still being worked on
 		{
-			std::get<2>(TaskThreadRef->second)->SetNotifyMainThreadOnFinish(); //we tell the task's worker thread to unlock teh main thread once the task is done
+			AsyncTask* FoundTask = std::get<2>(TaskThreadRef->second);
+			if (!FoundTask)
+			{
+				return;
+			}
+			
+			//we tell the task's worker thread to unlock teh main thread once the task is done
+			FoundTask->SetNotifyMainThreadOnFinish();
 			ThreadStatusLock.unlock();
 			std::lock_guard<std::mutex> MainThreadLock(M_MainFunction); //locking main thread
 			bMainThreadUnlocked = false; 
@@ -137,6 +154,9 @@ void ThreadPool::wait(uint64_t _TaskID)
 		QueueLock.lock();
 		for (const auto Task : TasksQueue)
 		{
+			if (!Task)
+				continue;
+
 			if (Task->GetTaskID() == _TaskID)
 			{
 				Task->SetNotifyMainThreadOnFinish(); //we tell the task's worker thread to unlock teh main thread once the task is done
