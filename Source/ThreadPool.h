@@ -22,6 +22,8 @@ private:
 
 	bool bNotifyMainThreadOnFinish = false;
 
+	bool bIsComplete = false;
+
 public:
 
 	AsyncTask(std::function<void()>& _InTask, uint64_t _ThisTaskID) : TaskToRun(_InTask), TaskID(_ThisTaskID) {	};
@@ -36,6 +38,10 @@ public:
 	void SetNotifyMainThreadOnFinish() { bNotifyMainThreadOnFinish = true; }
 
 	bool ShouldNotifyMainThreadOnFinish() const { return bNotifyMainThreadOnFinish; }
+
+	bool IsCompleted() const { return bIsComplete; };
+
+	void SetCompleted() { bIsComplete = true; }
 };
 
 //main class managering threads
@@ -83,9 +89,6 @@ private:
 	//predicate for use in Wait() and Wait_all() methods; passed to condition variable and called, when it fires a notice
 	bool IsMainThreadUnlocked() { return bMainThreadUnlocked; };
 
-	//launches class main thread upon construction; Initializes all Task Threads(aka ThreadWorker())
-	void LaunchThreadPool();
-
 	//Task Threads' function working in infinite loop
 	void ThreadWorker();
 
@@ -96,11 +99,15 @@ public:
 	
 	ThreadPool(size_t _MaxThreads);
 
-	//adds a new function to the pool of tasks
-	//Does not accept functions with variable amount of random arguements or returns other than void at the moment
+	//launches class's main thread; Initializes all Task Threads(aka ThreadWorker())
+	void LaunchThreadPool();
+
+	//adds a new function to the pool of tasks;
+	//does not accept functions with variable amount of random arguements or returns other than void at the moment;
+	//functions with arguements can be passed via std::bind(FunctionName, Arguements...) asssigned to a std::function<void()> variable;
 	uint64_t AddTask(std::function<void()>& _InFunc);
 
-	//functions that lock main thread until selected tasks are complete
+	//2 member functions that lock calling thread until selected tasks are complete
 	void wait(uint64_t _TaskID);
 
 	void wait_all();

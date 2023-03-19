@@ -1,23 +1,26 @@
 #include "ThreadPool.h"
 
+//for debug\test purposes
+#include <iostream>
+
 ThreadPool::ThreadPool(size_t _MaxThreads)
 {
 	MaxThreads = _MaxThreads;
 
-	LaunchThreadPool();
+	//reserve the 0 TaskID for state of no task performed
+	std::lock_guard<std::recursive_mutex> TaskIDLock(M_TaskIDs);
+	TaskIDs.insert(std::pair < uint64_t, AsyncTask*>(0, nullptr));
 }
 
 void ThreadPool::LaunchThreadPool()
 {
-	//reserve the 0 TaskID for state of no task performed
-	TaskIDs.insert(std::pair < uint64_t, AsyncTask*>(0,nullptr));
-	
 	//create a pool of worker threads that will be pulling tasks from TasksQueue
 	for (size_t i = 0; i < MaxThreads; i++)
 	{
 		std::thread NewThread(&ThreadPool::ThreadWorker, this);
+		std::lock_guard<std::recursive_mutex> ThreadsLock(M_ThreadsStatus);
 		ThreadsStatus.emplace(NewThread.get_id(), std::make_pair(false, 0));
-		//ActiveThreads.push_back(NewThread);
+
 		NewThread.detach(); //another ThreadWorker's work loop is launched
 	}
 
@@ -26,6 +29,11 @@ void ThreadPool::LaunchThreadPool()
 	{
 		std::unique_lock<std::mutex> MainFuncLock(M_MainFunction);
 		CV_MainFunction.wait(MainFuncLock, [this]()->bool {return IsMainThreadUnlocked(); });
+		
+		//debug
+		//it may slow down unlocking of threads that called wait() or wait_all() so should be commented out for real life application
+		std::cout << "Main thread is working" << std::endl;
+		std::this_thread::sleep_for(std::chrono::seconds(1));
 	}
 }
 
@@ -42,9 +50,18 @@ void ThreadPool::ThreadWorker()
 			AsyncTask* CurrentTask;
 			{
 				std::lock_guard<std::recursive_mutex> ThreadsLock(M_ThreadsStatus);
-				CurrentTaskID = TasksQueue.front()->GetTaskID();
-				CurrentTask = TasksQueue.front();
-				TasksQueue.pop_front(); //remove the task from queue
+
+				//additional check needed to allow for early release of TasksQueue
+				if (TasksQueue.size() > 0)
+				{
+					CurrentTaskID = TasksQueue.front()->GetTaskID();
+					CurrentTask = TasksQueue.front();
+					TasksQueue.pop_front(); //remove the task from queue
+				}
+				else
+				{
+					continue;
+				}
 			}
 
 			{
@@ -60,6 +77,8 @@ void ThreadPool::ThreadWorker()
 
 			CurrentTask->StartTask(); //loop is stuck until the task is complete
 
+			CurrentTask->SetCompleted();
+
 			if (CurrentTask->ShouldNotifyMainThreadOnFinish()) //unlocks main thread if wait() was called on this task
 			{
 				NumberOfLockingTasks.store(NumberOfLockingTasks.load() - 1); 
@@ -69,7 +88,13 @@ void ThreadPool::ThreadWorker()
 					CV_MainFunction.notify_all();
 				}
 			}
-			CurrentTask->~AsyncTask(); //free up the memory allocated to keep the task wrapper
+		
+			//free up the memory allocated to keep the task wrapper
+			delete CurrentTask; 
+			{
+				std::lock_guard<std::recursive_mutex> TaskIDLock(M_TaskIDs);
+				TaskIDs.find(CurrentTaskID)->second = nullptr;
+			}
 
 			//Mark this thread as not working anymore
 			{
@@ -101,7 +126,7 @@ void ThreadPool::CallingThreadLocker()
 uint64_t ThreadPool::AddTask(std::function<void()>& _InFunc)
 {
 	//trying to lock main thread (redudancy in case of wait() member functions' use)
-	std::lock_guard<std::mutex> MainThreadLock(M_MainFunction);
+	std::unique_lock<std::mutex> MainThreadLock(M_MainFunction);
 	
 	//assign ID to the task
 	uint64_t NewTaskID = TaskIDs.size();
@@ -152,32 +177,44 @@ void ThreadPool::wait(uint64_t _TaskID)
 	bMainThreadUnlocked = false;
 	CV_MainFunction.notify_all();
 
+	CallingThreadLocker();
+
 	return;
 }
 
 void ThreadPool::wait_all()
 {
 	auto LockerLambda = [this]() {
-		
 		std::lock_guard<std::recursive_mutex> TaskIDLock(M_TaskIDs);
 		for (const auto Task : TaskIDs)
 		{
-			if (Task.second) //if task is still valid...
+			if (Task.second == nullptr) 
+			{
+				continue;
+			}
+			else if(!Task.second->IsCompleted()) //if task is still valid...
 			{
 				//we ask it to notify us, when it's done working
 				Task.second->SetNotifyMainThreadOnFinish();
-				//and start the lock of the main thread
+				//prepare the lock of the main thread
 				NumberOfLockingTasks.store(NumberOfLockingTasks.load() + 1);
-				std::lock_guard<std::mutex> MainThreadLock(M_MainFunction);
-				bMainThreadUnlocked = false;
 			}
 		}
-		CV_MainFunction.notify_all();
-		
 	};
 	
 	std::thread LockerThread(LockerLambda); //launch the locker lambda in a separate thread to avoid freezing it along with the main one
 	LockerThread.detach();
+	
+	//giving lambda 1 milisecond to find the first unfinished Task (if there is one) before checking if any were found
+	std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+	if (NumberOfLockingTasks.load() > 0)
+	{
+		CallingThreadLocker();
+		std::lock_guard<std::mutex> MainThreadLock(M_MainFunction); //locking main thread
+		bMainThreadUnlocked = false;
+		CV_MainFunction.notify_all();
+	}
 
 	return;
 }
