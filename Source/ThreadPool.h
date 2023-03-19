@@ -39,7 +39,6 @@ public:
 };
 
 //main class managering threads
-//TODO: consider making it singleton
 class ThreadPool
 {
 private:
@@ -49,11 +48,11 @@ private:
 
 	std::mutex M_CallingThread;
 
-	std::shared_mutex M_TasksQueue;
+	std::recursive_mutex M_TasksQueue;
 
-	std::shared_mutex M_ThreadsStatus;
+	std::recursive_mutex M_ThreadsStatus;
 
-	std::shared_mutex M_TaskIDs;
+	std::recursive_mutex M_TaskIDs;
 
 	std::condition_variable CV_MainFunction;
 
