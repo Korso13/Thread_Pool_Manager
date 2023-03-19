@@ -20,8 +20,6 @@ private:
 
 	std::function<void()>& TaskToRun;
 
-	//std::condition_variable CV;
-
 	bool bNotifyMainThreadOnFinish = false;
 
 public:
@@ -34,8 +32,6 @@ public:
 
 	//starts asyncronous task
 	void StartTask() {TaskToRun();};
-
-	//const std::condition_variable& GetTaskCV() const { return CV; }
 
 	void SetNotifyMainThreadOnFinish() { bNotifyMainThreadOnFinish = true; }
 
@@ -50,6 +46,8 @@ private:
 
 	//Mutextes and condition variables:
 	std::mutex M_MainFunction;
+
+	std::mutex M_CallingThread;
 
 	std::shared_mutex M_TasksQueue;
 
@@ -75,7 +73,7 @@ private:
 	//Tasks' queue
 	std::deque<AsyncTask*> TasksQueue; 
 
-	//Tasks' unique IDs'
+	//Tasks' unique IDs and respective TaskWrappers
 	std::map<uint64_t, AsyncTask*> TaskIDs; //assures unique TaskIDs
 
 private:
@@ -92,6 +90,9 @@ private:
 	//Task Threads' function working in infinite loop
 	void ThreadWorker();
 
+	//in case we need to lock not the class' main thread, but a calling thread, we put this (namely in wait() and wait_all() at the spot, where we lock teh main thread)s
+	void CallingThreadLocker();
+
 public:
 	
 	ThreadPool(size_t _MaxThreads);
@@ -100,6 +101,7 @@ public:
 	//Does not accept functions with variable amount of random arguements or returns other than void at the moment
 	uint64_t AddTask(std::function<void()>& _InFunc);
 
+	//functions that lock main thread until selected tasks are complete
 	void wait(uint64_t _TaskID);
 
 	void wait_all();

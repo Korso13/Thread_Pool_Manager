@@ -84,6 +84,19 @@ void ThreadPool::ThreadWorker()
 	}
 }
 
+void ThreadPool::CallingThreadLocker()
+{
+	while (true)
+	{
+		std::unique_lock<std::mutex> ThreadLock(M_CallingThread);
+		CV_MainFunction.wait(ThreadLock, [this]()->bool {return IsMainThreadUnlocked(); }); //checks status of bMainThreadUnlocked flag when any thread invokes notify_all() on CV_MainFunction condition variable
+		
+		//redundancy check
+		if(IsMainThreadUnlocked())
+			break;
+	}
+}
+
 uint64_t ThreadPool::AddTask(std::function<void()>& _InFunc)
 {
 	//trying to lock main thread (redudancy in case of wait() member functions' use)
