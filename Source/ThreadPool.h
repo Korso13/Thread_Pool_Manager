@@ -28,7 +28,7 @@ public:
 
 	AsyncTask(std::function<void()>& _InTask, uint64_t _ThisTaskID) : TaskToRun(_InTask), TaskID(_ThisTaskID) {	};
 
-	~AsyncTask();
+	~AsyncTask() {};
 
 	uint64_t GetTaskID() const { return TaskID; }
 
@@ -62,19 +62,21 @@ private:
 	//Other variables:
 	bool bMainThreadUnlocked = true;
 
+	std::atomic<uint64_t> NumberOfLockingTasks = 0;
+
 	size_t MaxThreads = 0;
 
 	//Data arrays:
 
 	//Map containing all worker threads' statuses. One record per each Task Thread(aka ThreadWorker()); 
 	//in std::pair, bool indicates thread's status(working/not working), uint64_t - active task's ID
-	std::map<std::thread::id, std::tuple<bool, uint64_t, AsyncTask*>> ThreadsStatus;
+	std::map<std::thread::id, std::pair<bool, uint64_t>> ThreadsStatus;
 
 	//Tasks' queue
 	std::deque<AsyncTask*> TasksQueue; 
 
 	//Tasks' unique IDs'
-	std::map<uint64_t, std::thread::id> TaskIDs; //assures unique TaskIDs
+	std::map<uint64_t, AsyncTask*> TaskIDs; //assures unique TaskIDs
 
 private:
 

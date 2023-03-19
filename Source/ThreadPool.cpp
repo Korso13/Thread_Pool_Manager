@@ -10,13 +10,13 @@ ThreadPool::ThreadPool(size_t _MaxThreads)
 void ThreadPool::LaunchThreadPool()
 {
 	//reserve the 0 TaskID for state of no task performed
-	TaskIDs.insert(std::pair < uint64_t, std::thread::id>(0, std::this_thread::get_id()));
+	TaskIDs.insert(std::pair < uint64_t, AsyncTask*>(0,nullptr));
 	
 	//create a pool of worker threads that will be pulling tasks from TasksQueue
 	for (size_t i = 0; i < MaxThreads; i++)
 	{
 		std::thread NewThread(&ThreadPool::ThreadWorker, this);
-		ThreadsStatus.emplace(NewThread.get_id(), std::make_tuple(false, 0, nullptr));
+		ThreadsStatus.emplace(NewThread.get_id(), std::make_pair(false, 0));
 		//ActiveThreads.push_back(NewThread);
 		NewThread.detach(); //another ThreadWorker's work loop is launched
 	}
@@ -51,12 +51,8 @@ void ThreadPool::ThreadWorker()
 
 			ThreadStatusLock.lock();
 			auto It = ThreadsStatus.find(std::this_thread::get_id()); //find this thread's record in the ThreadsStatus std::map
-			It->second = std::make_tuple(true, CurrentTaskID, CurrentTask); //This thread is working flag + Thread task's ID + ptr to the task's wrapper
+			It->second = std::make_pair(true, CurrentTaskID); //This thread is working flag + Thread task's ID + ptr to the task's wrapper
 			ThreadStatusLock.unlock();
-
-			TaskIDLock.lock();
-			TaskIDs.find(CurrentTaskID)->second = std::this_thread::get_id(); //assigning this thread's id to the TaskID (needed for wait() member function to work)
-			TaskIDLock.unlock();
 
 			if (!CurrentTask)
 			{
@@ -66,8 +62,12 @@ void ThreadPool::ThreadWorker()
 			CurrentTask->StartTask(); //loop is stuck until the task is complete
 			if (CurrentTask->ShouldNotifyMainThreadOnFinish()) //unlocks main thread if wait() was called on this task
 			{
-				bMainThreadUnlocked = true;
-				CV_MainFunction.notify_all();
+				NumberOfLockingTasks.store(NumberOfLockingTasks.load() - 1); 
+				if (NumberOfLockingTasks.load() == 0)
+				{
+					bMainThreadUnlocked = true;
+					CV_MainFunction.notify_all();
+				}
 			}
 			CurrentTask->~AsyncTask(); //free up teh memory allocated to keep the task wrapper
 		}
@@ -79,7 +79,7 @@ void ThreadPool::ThreadWorker()
 
 		ThreadStatusLock.lock();
 		auto It = ThreadsStatus.find(std::this_thread::get_id());
-		It->second = std::make_tuple(false, 0, nullptr); //This thread is not working anymore
+		It->second = std::make_pair(false, 0); //This thread is not working anymore
 		ThreadStatusLock.unlock();
 	}
 }
@@ -88,13 +88,16 @@ uint64_t ThreadPool::AddTask(std::function<void()>& _InFunc)
 {
 	//trying to lock main thread (redudancy in case of wait() member functions' use)
 	std::lock_guard<std::mutex> MainThreadLock(M_MainFunction);
+	
 	//assign ID to the task
 	uint64_t NewTaskID = TaskIDs.size();
-	TaskIDs.insert(std::pair< uint64_t, std::thread::id>(NewTaskID, std::this_thread::get_id())); //thread_id is temporary - fill be replaced once the task is launched by a specific task thread
 
 	//create wrapper for the task
 	AsyncTask* NewTask = new AsyncTask(_InFunc, NewTaskID);
 
+	//store Task ID and pointer to its wrapper for future reference
+	TaskIDs.insert(std::pair< uint64_t, AsyncTask*>(NewTaskID, NewTask));
+	
 	//throw it into queue, where the first free ThreadWorker will grab it
 	if (NewTask)
 	{
@@ -107,103 +110,59 @@ uint64_t ThreadPool::AddTask(std::function<void()>& _InFunc)
 
 void ThreadPool::wait(uint64_t _TaskID)
 {
-	std::shared_lock<std::shared_mutex> QueueLock(M_TasksQueue);
-	std::shared_lock<std::shared_mutex> ThreadStatusLock(M_ThreadsStatus);
 	std::shared_lock<std::shared_mutex> TaskIDLock(M_TaskIDs);
 	
 	TaskIDLock.lock();
 	auto It = TaskIDs.find(_TaskID);
+
 	if (It == TaskIDs.end())
 	{
 		return; //no such task was ever created
 	}
 
-	std::thread::id TaskThreadID;
-
-	if (It->second != std::this_thread::get_id()) //means that the task might be worked on in the thread
+	if(!It->second)
 	{
-		TaskThreadID = It->second;
-		TaskIDLock.unlock();
-		ThreadStatusLock.lock();
-		auto TaskThreadRef = ThreadsStatus.find(TaskThreadID);
-		if (TaskThreadRef != ThreadsStatus.end())//the task IS still being worked on
-		{
-			AsyncTask* FoundTask = std::get<2>(TaskThreadRef->second);
-			if (!FoundTask)
-			{
-				return;
-			}
-			
-			//we tell the task's worker thread to unlock teh main thread once the task is done
-			FoundTask->SetNotifyMainThreadOnFinish();
-			ThreadStatusLock.unlock();
-			std::lock_guard<std::mutex> MainThreadLock(M_MainFunction); //locking main thread
-			bMainThreadUnlocked = false; 
-			CV_MainFunction.notify_all();
-			return;
-		}
-		else 
-		{
-			ThreadStatusLock.unlock(); //task has already been completed
-			return;
-		}
+		return; //task is not valid, likely has already been completed
 	}
-	else //means that the task is in the queue
-	{
-		TaskIDLock.unlock();
-		QueueLock.lock();
-		for (const auto Task : TasksQueue)
-		{
-			if (!Task)
-				continue;
 
-			if (Task->GetTaskID() == _TaskID)
-			{
-				Task->SetNotifyMainThreadOnFinish(); //we tell the task's worker thread to unlock teh main thread once the task is done
-				break;
-			}
-		}
-		QueueLock.unlock();
-		std::lock_guard<std::mutex> MainThreadLock(M_MainFunction);//locking main thread
-		bMainThreadUnlocked = false; 
-		CV_MainFunction.notify_all();
-		return;
-	}
+	//we tell the task's worker thread to unlock teh main thread once the task is done
+	It->second->SetNotifyMainThreadOnFinish();
+	TaskIDLock.unlock();
+
+	NumberOfLockingTasks.store(NumberOfLockingTasks.load() + 1);
+
+	std::lock_guard<std::mutex> MainThreadLock(M_MainFunction); //locking main thread
+	bMainThreadUnlocked = false;
+	CV_MainFunction.notify_all();
+
+	return;
 }
 
 void ThreadPool::wait_all()
 {
-	bMainThreadUnlocked = false; //locking main thread
-	std::lock_guard<std::mutex> MainThreadLock(M_MainFunction);
+	std::shared_lock<std::shared_mutex> TaskIDLock(M_TaskIDs);
 
-	auto WatcherLambda = [this](std::lock_guard<std::mutex>* lock) {
-		while (true)
+	auto LockerLambda = [this](std::shared_lock<std::shared_mutex>* _TaskIDLock) {
+		
+		_TaskIDLock->lock();
+		for (const auto Task : TaskIDs)
 		{
-			bool bNoActiveTasks = true;
-			for (const auto Task : ThreadsStatus)
+			if (Task.second) //if task is still valid...
 			{
-				if (std::get<0>(Task.second))
-				{
-					bNoActiveTasks = false;
-					break;
-				}
+				//we ask it to notify us, when it's done working
+				Task.second->SetNotifyMainThreadOnFinish();
+				//and start the lock of the main thread
+				NumberOfLockingTasks.store(NumberOfLockingTasks.load() + 1);
+				std::lock_guard<std::mutex> MainThreadLock(M_MainFunction);
+				bMainThreadUnlocked = false;
 			}
-			if (TasksQueue.size() == 0 && bNoActiveTasks)
-			{
-				bMainThreadUnlocked = true; //unlocking main thread
-				if (lock)
-				{
-					lock->~lock_guard();
-				}
-				CV_MainFunction.notify_all();
-				break;
-			}
-		};
+		}
+		CV_MainFunction.notify_all();
+		_TaskIDLock->unlock();
 	};
 	
-	std::thread WatcherThread(WatcherLambda, &MainThreadLock); //launch the above loop in a separate thread to avoid freezing it along with the main one
-	WatcherThread.detach();
+	std::thread LockerThread(LockerLambda, &TaskIDLock); //launch the locker lambda in a separate thread to avoid freezing it along with the main one
+	LockerThread.detach();
 
-	CV_MainFunction.notify_all(); //locks the main thread until a detached watcher thread unlocks it
 	return;
 }
