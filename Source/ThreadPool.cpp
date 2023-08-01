@@ -123,6 +123,13 @@ void ThreadPool::CallingThreadLocker()
 	}
 }
 
+//template<class ...Args>
+//uint64_t ThreadPool::AddTaskWithArgs(std::function<void(Args...)>* _InFunc, Args... args)
+//{
+//	auto function = std::bind(_InFunc, args);
+//	return AddTask(function);
+//}
+
 uint64_t ThreadPool::AddTask(std::function<void()>& _InFunc)
 {
 	//trying to lock main thread (redudancy in case of wait() member functions' use)
@@ -131,8 +138,10 @@ uint64_t ThreadPool::AddTask(std::function<void()>& _InFunc)
 	//assign ID to the task
 	uint64_t NewTaskID = TaskIDs.size();
 
+	auto func = [_InFunc]() {if (_InFunc)_InFunc(); };
+
 	//create wrapper for the task
-	AsyncTask* NewTask = new AsyncTask(_InFunc, NewTaskID);
+	AsyncTask* NewTask = new AsyncTask(std::move(func), NewTaskID);
 
 	{
 		std::lock_guard<std::recursive_mutex> TaskIDLock(M_TaskIDs);
@@ -186,7 +195,7 @@ void ThreadPool::wait_all()
 {
 	auto LockerLambda = [this]() {
 		std::lock_guard<std::recursive_mutex> TaskIDLock(M_TaskIDs);
-		for (const auto Task : TaskIDs)
+		for (const auto& Task : TaskIDs)
 		{
 			if (Task.second == nullptr) 
 			{

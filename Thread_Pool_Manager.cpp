@@ -37,9 +37,9 @@ void TestFunc5()
 	std::cout << "TestFunc5 finished working" << std::endl;
 }
 
-void TestFunc(int i)
+void TestFunc(int i, float f)
 {
-	std::cout << "TestFunc " << i << " is working" << std::endl;
+	std::cout << "TestFunc " << i << " with extra arguement " << f << " is working" << std::endl;
 	std::this_thread::sleep_for(std::chrono::seconds(i));
 	std::cout << "TestFunc " << i << " finished working" << std::endl;
 }
@@ -53,13 +53,12 @@ int main()
 	std::function<void()> f3 = TestFunc3;
 	std::function<void()> f4 = TestFunc4;
 	std::function<void()> f5 = TestFunc5;
-	std::function<void()> f6 = std::bind(TestFunc, 6); //a way to pass a function with variable amount of arguements to ThreadPool manager
 	
 	//ThreadPool ThreadPoolManager(4); singleton class - error! Needs to be instanced via ThreadPool::Instance()
 	ThreadPool* ThreadPoolManager = ThreadPool::Instance(4);
 	ThreadPoolManager = ThreadPool::Instance(3); //error - singleton ThreadPool already instanced with 4 threads
-
-	uint64_t Task3ID = ThreadPoolManager->AddTask(f3);
+		
+	ThreadPoolManager->AddTask(f3);
 	uint64_t Task5ID = ThreadPoolManager->AddTask(f5);
 
 	ThreadPoolManager->wait(Task5ID);
@@ -67,11 +66,11 @@ int main()
 	ThreadPoolManager->AddTask(f1);
 	ThreadPoolManager->AddTask(f2);
 	ThreadPoolManager->AddTask(f4);
+	ThreadPoolManager->AddTask(TestFunc, 6, 3.14f);
 
-	ThreadPoolManager->wait_all();
+	//ThreadPoolManager->wait_all(); //currently bugged 
 
-	ThreadPoolManager->AddTask(f6);
-	std::cout << "Adding TestFunc(int i) task after wait_all(). Should happen after tasks 1, 2 and 4 are completed" << std::endl;
+	//std::cout << "Adding TestFunc(int i) task after wait_all(). Should happen after tasks 1, 2 and 4 are completed" << std::endl;
 
 	char a;
 	std::cin >> a;

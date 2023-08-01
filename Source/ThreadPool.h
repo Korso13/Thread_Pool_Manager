@@ -17,9 +17,9 @@ private:
 	
 	AsyncTask() = delete;
 
-	uint64_t TaskID;
+	std::function<void()> TaskToRun;
 
-	std::function<void()>& TaskToRun;
+	uint64_t TaskID;
 
 	bool bNotifyMainThreadOnFinish = false;
 
@@ -27,14 +27,14 @@ private:
 
 public:
 
-	AsyncTask(std::function<void()>& _InTask, uint64_t _ThisTaskID) : TaskToRun(_InTask), TaskID(_ThisTaskID) {	};
+	AsyncTask(std::function<void()>&& _InTask, uint64_t _ThisTaskID) : TaskToRun(_InTask), TaskID(_ThisTaskID) {	};
 
 	~AsyncTask() {};
 
 	uint64_t GetTaskID() const { return TaskID; }
 
 	//starts asyncronous task
-	void StartTask() {TaskToRun();};
+	void StartTask() {if(TaskToRun) TaskToRun();};
 
 	void SetNotifyMainThreadOnFinish() { bNotifyMainThreadOnFinish = true; }
 
@@ -45,13 +45,12 @@ public:
 	void SetCompleted() { bIsComplete = true; }
 };
 
-static class ThreadPool* ThreadPoolInst = nullptr;
+static class ThreadPool* ThreadPoolInst;
 static std::thread MainPoolManagerThread;
 
 //main class managering threads
 class ThreadPool
 {
-
 public:
 
 	static ThreadPool* Instance(size_t _MaxThreads)
@@ -59,7 +58,7 @@ public:
 		if (!ThreadPoolInst)
 		{
 			ThreadPoolInst = new ThreadPool(_MaxThreads);
-			std::thread MainPoolManagerThread(&ThreadPool::LaunchThreadPool, ThreadPoolInst);
+			MainPoolManagerThread = std::thread(&ThreadPool::LaunchThreadPool, ThreadPoolInst);
 			MainPoolManagerThread.detach();
 		}
 		else
@@ -77,10 +76,19 @@ public:
 	//does not accept functions with variable amount of random arguements or returns other than void at the moment;
 	//functions with arguements can be passed via std::bind(FunctionName, Arguements...) asssigned to a std::function<void()> variable;
 	uint64_t AddTask(std::function<void()>& _InFunc);
+	uint64_t AddTask(std::function<void()>&& _InFunc) { return AddTask(_InFunc); };
+
+	template<class ...Args>
+	uint64_t AddTask(void (*_InFunc)(Args...), Args... args)
+	{
+		std::function<void()> function = std::bind(_InFunc, args...);
+		return AddTask(function);
+	}
 
 	//2 member functions that lock calling thread until selected tasks are complete
 	void wait(uint64_t _TaskID);
 
+	//TODO: Fix it (try different C++ standard)
 	void wait_all();
 
 protected:
@@ -99,8 +107,8 @@ protected:
 	//in case we need to lock not the class' main thread, but a calling thread, we put this (namely in wait() and wait_all() at the spot, where we lock teh main thread)s
 	void CallingThreadLocker();
 
-
 private:
+
 
 	//Mutextes and condition variables:
 	std::mutex M_MainFunction;
