@@ -55,23 +55,22 @@ int main()
 	std::function<void()> f5 = TestFunc5;
 	std::function<void()> f6 = std::bind(TestFunc, 6); //a way to pass a function with variable amount of arguements to ThreadPool manager
 	
-	ThreadPool ThreadPoolManager(4);
+	//ThreadPool ThreadPoolManager(4); singleton class - error! Needs to be instanced via ThreadPool::Instance()
+	ThreadPool* ThreadPoolManager = ThreadPool::Instance(4);
+	ThreadPoolManager = ThreadPool::Instance(3); //error - singleton ThreadPool already instanced with 4 threads
 
-	std::thread MainPoolManagerThread(&ThreadPool::LaunchThreadPool, &ThreadPoolManager);
-	MainPoolManagerThread.detach();
+	uint64_t Task3ID = ThreadPoolManager->AddTask(f3);
+	uint64_t Task5ID = ThreadPoolManager->AddTask(f5);
 
-	uint64_t Task3ID = ThreadPoolManager.AddTask(f3);
-	uint64_t Task5ID = ThreadPoolManager.AddTask(f5);
+	ThreadPoolManager->wait(Task5ID);
 
-	ThreadPoolManager.wait(Task5ID);
+	ThreadPoolManager->AddTask(f1);
+	ThreadPoolManager->AddTask(f2);
+	ThreadPoolManager->AddTask(f4);
 
-	ThreadPoolManager.AddTask(f1);
-	ThreadPoolManager.AddTask(f2);
-	ThreadPoolManager.AddTask(f4);
+	ThreadPoolManager->wait_all();
 
-	ThreadPoolManager.wait_all();
-
-	ThreadPoolManager.AddTask(f6);
+	ThreadPoolManager->AddTask(f6);
 	std::cout << "Adding TestFunc(int i) task after wait_all(). Should happen after tasks 1, 2 and 4 are completed" << std::endl;
 
 	char a;
